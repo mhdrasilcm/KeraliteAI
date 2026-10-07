@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  background: #f2f0eb; /* warm parchment canvas — never pure white */
+  color: #292827; /* ink charcoal */
+  font-weight: 460;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior-y: none; /* avoid the mobile pull-to-refresh flash mid-chat */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Mobile is the primary surface: keep tap targets generous and avoid hover-only affordances */
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+::selection {
+  background: #d4c7ff;
+  color: #292827;
+}
+
+:focus-visible {
+  outline: 2px solid #714cb6;
+  outline-offset: 2px;
+}
