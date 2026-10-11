@@ -1,7 +1,5 @@
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
+mport { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-
-export const runtime = "edge"; // required for Cloudflare Pages
 
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request: { headers: request.headers } });
