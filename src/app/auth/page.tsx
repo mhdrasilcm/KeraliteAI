@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Script from "next/script";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/Button";
@@ -24,6 +24,11 @@ export default function AuthPage() {
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Landing page links here with ?mode=signup
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("mode") === "signup") setMode("sign-up");
+  }, []);
 
   async function handleEmailAuth(e: React.FormEvent) {
     e.preventDefault();
@@ -79,6 +84,9 @@ export default function AuthPage() {
       />
       <main className="min-h-screen flex items-center justify-center px-16 safe-top safe-bottom">
         <div className="w-full max-w-[400px] bg-paper-white rounded-cards p-24 border border-soft-mist">
+          <a href="/" className="text-body-sm text-stone-gray hover:underline mb-16 block">
+            ← Keralite AI
+          </a>
           <h1 className="text-heading-sm font-w460 mb-8">
             {mode === "sign-in" ? "Log in to Keralite AI" : "Create your account"}
           </h1>

@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import "@fontsource-variable/inter";
 import "@/styles/globals.css";
 import { RegisterServiceWorker } from "@/components/RegisterServiceWorker";
 

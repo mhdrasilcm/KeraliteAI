@@ -19,6 +19,7 @@ const config: Config = {
       fontFamily: {
         sans: [
           "'Super Sans VF'",
+          "'Inter Variable'",
           "Inter",
           "ui-sans-serif",
           "system-ui",

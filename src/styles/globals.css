@@ -37,3 +37,38 @@ a {
   outline: 2px solid #714cb6;
   outline-offset: 2px;
 }
+
+/* ---- Landing ---- */
+
+/* DESIGN.md "Gradient Banner": layered radial glows (violet, blue, pink, cyan) at ~50-60% opacity */
+.hero-scene {
+  background-color: #f2f0eb;
+  background-image:
+    radial-gradient(circle at 68% 50%, rgba(113, 76, 182, 0.5) 0%, rgba(113, 76, 182, 0) 42%),
+    radial-gradient(circle at 93% 50%, rgba(90, 130, 255, 0.5) 0%, rgba(90, 130, 255, 0) 38%),
+    radial-gradient(circle at 50% 98%, rgba(255, 130, 195, 0.55) 0%, rgba(255, 130, 195, 0) 44%),
+    radial-gradient(circle at 50% 75%, rgba(90, 220, 232, 0.5) 0%, rgba(90, 220, 232, 0) 38%);
+}
+
+/* Glass card. Before (or without) liquid-gl this is a CSS frosted card.
+   Once the lens is live (data-glass="on") the surface is handed to the lens. */
+.glass-card {
+  position: relative;
+  z-index: 10; /* liquid-gl: every lens on the shared canvas needs the same z-index */
+  text-align: left;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+}
+.glass-card[data-glass="on"] {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-color: transparent;
+}
+.glass-content {
+  position: relative;
+  z-index: 3; /* sits above the lens so text isn't refracted */
+}

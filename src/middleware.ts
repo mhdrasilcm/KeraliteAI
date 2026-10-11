@@ -28,7 +28,10 @@ export async function middleware(request: NextRequest) {
 
   const path = request.nextUrl.pathname;
   const isAuthRoute = path.startsWith("/auth");
-  const isPublic = isAuthRoute || path.startsWith("/api/public");
+  const isPublic =
+    isAuthRoute ||
+    path === "/" || // public home page
+    path.startsWith("/api/auth"); // Turnstile check must work while signed out
 
   if (!user && !isPublic) {
     const url = request.nextUrl.clone();
