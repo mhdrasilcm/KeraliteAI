@@ -192,6 +192,7 @@ export function Landing() {
             <ul className="mt-12 flex flex-col gap-12 text-body-sm text-paper-white/70">
               <li><a href="/auth" className="hover:underline">Log in</a></li>
               <li><a href="/auth?mode=signup" className="hover:underline">Sign up</a></li>
+              <li><a href="/privacy" className="hover:underline">Privacy policy</a></li>
             </ul>
           </div>
         </div>

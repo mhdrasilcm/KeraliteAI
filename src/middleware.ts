@@ -31,6 +31,7 @@ export async function middleware(request: NextRequest) {
   const isPublic =
     isAuthRoute ||
     path === "/" || // public home page
+    path === "/privacy" || // privacy policy (also required by Google sign-in)
     path.startsWith("/api/auth"); // Turnstile check must work while signed out
 
   if (!user && !isPublic) {

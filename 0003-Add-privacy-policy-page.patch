@@ -1,0 +1,180 @@
+From a047356b49d56ff444fddc94d8f3de123e202508 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 04:05:46 +0000
+Subject: [PATCH] Add privacy policy page (needed to publish Google sign-in)
+
+Public /privacy route, linked from the home page footer. Google requires a privacy policy URL on the same domain as the home page before an external app can be published. Optional NEXT_PUBLIC_CONTACT_EMAIL shows a contact email on the page.
+---
+ src/app/privacy/page.tsx           | 134 +++++++++++++++++++++++++++++
+ src/components/landing/Landing.tsx |   1 +
+ src/middleware.ts                  |   1 +
+ 3 files changed, 136 insertions(+)
+ create mode 100644 src/app/privacy/page.tsx
+
+diff --git a/src/app/privacy/page.tsx b/src/app/privacy/page.tsx
+new file mode 100644
+index 0000000..8c6954b
+--- /dev/null
++++ b/src/app/privacy/page.tsx
+@@ -0,0 +1,134 @@
++import type { Metadata } from "next";
++
++export const metadata: Metadata = {
++  title: "Privacy Policy · Keralite AI",
++  description: "How Keralite AI handles account and student information.",
++};
++
++// Optional: set NEXT_PUBLIC_CONTACT_EMAIL in Cloudflare to show a contact email here.
++const CONTACT_EMAIL = process.env.NEXT_PUBLIC_CONTACT_EMAIL;
++
++const h2 = "mt-40 text-[26px] font-w460 leading-[1.3] tracking-[-0.014em]";
++const p = "mt-12 text-body leading-[1.5]";
++const li = "mt-8 leading-[1.5]";
++
++export default function PrivacyPage() {
++  return (
++    <main className="min-h-screen bg-warm-parchment">
++      <header className="border-b border-soft-mist">
++        <div className="mx-auto flex h-[64px] max-w-[720px] items-center justify-between px-16">
++          <a href="/" className="text-label-bold font-w540 tracking-[-0.01em]">
++            Keralite AI
++          </a>
++          <a href="/auth" className="text-body hover:underline underline-offset-4">
++            Log in
++          </a>
++        </div>
++      </header>
++
++      <article className="mx-auto max-w-[720px] px-16 py-48 md:py-64">
++        <h1 className="text-[36px] font-w460 leading-[1.1] tracking-[-0.022em] md:text-[48px]">
++          Privacy Policy
++        </h1>
++        <p className="mt-12 text-body-sm text-stone-gray">Last updated: October 2026</p>
++
++        <p className={p}>
++          Keralite AI is a study assistant for students in Kerala. This page explains what
++          information the app handles and why. Many of our users are children, so we keep the
++          amount of information small.
++        </p>
++
++        <h2 className={h2}>Who this is for</h2>
++        <p className={p}>
++          Students under 18 should use Keralite AI with the knowledge of a parent or guardian. One
++          account (one email address) can hold a profile for each student in a family, and the
++          person who owns the account is responsible for those profiles.
++        </p>
++
++        <h2 className={h2}>What we collect</h2>
++        <ul className="mt-12 list-disc pl-24">
++          <li className={li}>
++            <strong className="font-w540">Account details:</strong> your email address, and either a
++            password (stored by our login provider in hashed form, never in readable form) or your
++            Google sign-in. From Google we receive only your basic profile information, such as your
++            email address and name.
++          </li>
++          <li className={li}>
++            <strong className="font-w540">Student profiles:</strong> for each student, a name (or
++            nickname), class, first language and medium of instruction. We use these only to decide
++            which study resources to show.
++          </li>
++          <li className={li}>
++            <strong className="font-w540">Questions you ask:</strong> the text of a question is sent
++            to the AI service that writes the answer. Chat messages are not saved to our database at
++            this time. If we add saved chat history, we will update this page first.
++          </li>
++          <li className={li}>
++            <strong className="font-w540">Technical information:</strong> a session cookie that keeps
++            you logged in, and a bot check (Cloudflare Turnstile) when you sign in or sign up with
++            email.
++          </li>
++        </ul>
++
++        <h2 className={h2}>How we use it</h2>
++        <p className={p}>
++          To let you sign in, to keep each student&apos;s profile separate, to show study resources for
++          the right class and medium, and to answer questions. We do not sell personal information
++          and we do not show advertising.
++        </p>
++
++        <h2 className={h2}>Who else handles your data</h2>
++        <p className={p}>We rely on a small number of services to run the app:</p>
++        <ul className="mt-12 list-disc pl-24">
++          <li className={li}>Supabase, for sign-in and for storing accounts and student profiles.</li>
++          <li className={li}>Cloudflare, for hosting the site and for the Turnstile bot check.</li>
++          <li className={li}>Google, if you choose to sign in with Google.</li>
++          <li className={li}>
++            The AI service we use to generate answers. This may change over time, and we will keep
++            this page up to date.
++          </li>
++        </ul>
++        <p className={p}>
++          Data is sent over encrypted connections (HTTPS), and our database provider encrypts stored
++          data. We do not share information with anyone else except where the law requires it.
++        </p>
++
++        <h2 className={h2}>Your choices</h2>
++        <p className={p}>
++          You can ask us to correct or delete an account or a student profile at any time, and we
++          will remove it together with its data. Use the contact details below.
++        </p>
++
++        <h2 className={h2}>Changes to this policy</h2>
++        <p className={p}>
++          If we change how Keralite AI handles information, we will update this page and the date at
++          the top.
++        </p>
++
++        <h2 className={h2}>Contact</h2>
++        <p className={p}>
++          {CONTACT_EMAIL ? (
++            <>
++              Email us at{" "}
++              <a href={`mailto:${CONTACT_EMAIL}`} className="text-royal-violet hover:underline">
++                {CONTACT_EMAIL}
++              </a>
++              .
++            </>
++          ) : (
++            <>
++              Questions or requests about privacy can be sent through our project page on GitHub:{" "}
++              <a
++                href="https://github.com/mhdrasilcm/KeraliteAI"
++                className="text-royal-violet hover:underline"
++              >
++                github.com/mhdrasilcm/KeraliteAI
++              </a>
++              .
++            </>
++          )}
++        </p>
++      </article>
++    </main>
++  );
++}
+diff --git a/src/components/landing/Landing.tsx b/src/components/landing/Landing.tsx
+index 776f3be..5089376 100644
+--- a/src/components/landing/Landing.tsx
++++ b/src/components/landing/Landing.tsx
+@@ -192,6 +192,7 @@ export function Landing() {
+             <ul className="mt-12 flex flex-col gap-12 text-body-sm text-paper-white/70">
+               <li><a href="/auth" className="hover:underline">Log in</a></li>
+               <li><a href="/auth?mode=signup" className="hover:underline">Sign up</a></li>
++              <li><a href="/privacy" className="hover:underline">Privacy policy</a></li>
+             </ul>
+           </div>
+         </div>
+diff --git a/src/middleware.ts b/src/middleware.ts
+index 7fefd87..afef912 100644
+--- a/src/middleware.ts
++++ b/src/middleware.ts
+@@ -31,6 +31,7 @@ export async function middleware(request: NextRequest) {
+   const isPublic =
+     isAuthRoute ||
+     path === "/" || // public home page
++    path === "/privacy" || // privacy policy (also required by Google sign-in)
+     path.startsWith("/api/auth"); // Turnstile check must work while signed out
+ 
+   if (!user && !isPublic) {
+-- 
+2.43.0
+
