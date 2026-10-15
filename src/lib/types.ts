@@ -14,3 +14,14 @@ export interface Profile {
   avatar_emoji: string | null;
   created_at: string;
 }
+
+export interface Conversation {
+  id: string;
+  title: string;
+  updated_at: string;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}

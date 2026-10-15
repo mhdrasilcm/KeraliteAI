@@ -30,7 +30,7 @@ export default function PrivacyPage() {
         <h1 className="text-[36px] font-w460 leading-[1.1] tracking-[-0.022em] md:text-[48px]">
           Privacy Policy
         </h1>
-        <p className="mt-12 text-body-sm text-stone-gray">Last updated: October 2026</p>
+        <p className="mt-12 text-body-sm text-stone-gray">Last updated: 13 October 2026</p>
 
         <p className={p}>
           Keralite AI is a study assistant for students in Kerala. This page explains what
@@ -59,9 +59,10 @@ export default function PrivacyPage() {
             which study resources to show.
           </li>
           <li className={li}>
-            <strong className="font-w540">Questions you ask:</strong> the text of a question is sent
-            to the AI service that writes the answer. Chat messages are not saved to our database at
-            this time. If we add saved chat history, we will update this page first.
+            <strong className="font-w540">Chats:</strong> the questions a student asks and the
+            answers they get are saved under that student&apos;s profile, so old chats appear in the
+            sidebar. Only the account that owns the profile can read them. The text of a question
+            is also sent to the AI service that writes the answer.
           </li>
           <li className={li}>
             <strong className="font-w540">Technical information:</strong> a session cookie that keeps
@@ -73,7 +74,7 @@ export default function PrivacyPage() {
         <h2 className={h2}>How we use it</h2>
         <p className={p}>
           To let you sign in, to keep each student&apos;s profile separate, to show study resources for
-          the right class and medium, and to answer questions. We do not sell personal information
+          the right class and medium, to answer questions, and to keep each student&apos;s chat history. We do not sell personal information
           and we do not show advertising.
         </p>
 
@@ -95,8 +96,9 @@ export default function PrivacyPage() {
 
         <h2 className={h2}>Your choices</h2>
         <p className={p}>
-          You can ask us to correct or delete an account or a student profile at any time, and we
-          will remove it together with its data. Use the contact details below.
+          You can delete any saved chat yourself from the chat list. You can also ask us to correct or
+          delete an account or a student profile at any time, and we will remove it together with
+          its data. Use the contact details below.
         </p>
 
         <h2 className={h2}>Changes to this policy</h2>

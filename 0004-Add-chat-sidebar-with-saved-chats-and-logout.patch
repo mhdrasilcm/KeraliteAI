@@ -1,0 +1,1084 @@
+From 11e49aca1a7a074b5bcea2738940209651f19cd0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 09:48:27 +0000
+Subject: [PATCH] Add chat sidebar: new chat, saved chat list, profile menu
+ with log out
+
+Gemini-style sidebar (drawer on phones). Chats are saved per student profile in new conversations table (run supabase/migrations/002_chat_history.sql). /api/chat now saves messages and returns a friendly message instead of crashing when the AI model is unreachable. Privacy policy updated: chats are now saved.
+---
+ src/app/api/chat/route.ts                | 151 +++++++++++---
+ src/app/chat/page.tsx                    |  38 +++-
+ src/app/privacy/page.tsx                 |  16 +-
+ src/components/ChatInterface.tsx         | 239 +++++++++++++++--------
+ src/components/chat/ProfileMenu.tsx      |  95 +++++++++
+ src/components/chat/Sidebar.tsx          | 108 ++++++++++
+ src/components/chat/icons.tsx            |  55 ++++++
+ src/lib/types.ts                         |  11 ++
+ supabase/migrations/002_chat_history.sql |  64 ++++++
+ supabase/schema.sql                      |  69 +++++++
+ 10 files changed, 725 insertions(+), 121 deletions(-)
+ create mode 100644 src/components/chat/ProfileMenu.tsx
+ create mode 100644 src/components/chat/Sidebar.tsx
+ create mode 100644 src/components/chat/icons.tsx
+ create mode 100644 supabase/migrations/002_chat_history.sql
+
+diff --git a/src/app/api/chat/route.ts b/src/app/api/chat/route.ts
+index a64ca18..a924626 100644
+--- a/src/app/api/chat/route.ts
++++ b/src/app/api/chat/route.ts
+@@ -3,10 +3,17 @@ import { createClient } from "@/lib/supabase/server";
+ 
+ export const runtime = "edge";
+ 
++const UNAVAILABLE = "The study assistant is unavailable right now — try again shortly.";
++
++function makeTitle(question: string) {
++  const t = question.replace(/\s+/g, " ").trim();
++  return t.length > 48 ? `${t.slice(0, 45).trimEnd()}…` : t;
++}
++
+ // This route is the RAG boundary: it never lets the model see textbook
+-// content outside the asking profile's class/language/medium. Swap the
+-// SLM_ENDPOINT call below for wherever your open-source SLM is hosted
+-// (a Cloudflare Worker AI binding, a Modal/RunPod endpoint, etc).
++// content outside the asking profile's class/medium. It also keeps the
++// student's chat history: every question and answer is saved to a
++// conversation that belongs to that profile (RLS keeps it private).
+ export async function POST(request: NextRequest) {
+   const supabase = createClient();
+   const {
+@@ -14,23 +21,87 @@ export async function POST(request: NextRequest) {
+   } = await supabase.auth.getUser();
+   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+ 
+-  const { profileId, question, history } = await request.json();
++  let body: { profileId?: unknown; question?: unknown; conversationId?: unknown };
++  try {
++    body = await request.json();
++  } catch {
++    return NextResponse.json({ error: "Bad request" }, { status: 400 });
++  }
+ 
+-  // Confirm the profile belongs to this account — RLS enforces this too,
+-  // but checking explicitly keeps the resource filter honest.
+-  const { data: profile, error: profileError } = await supabase
++  if (typeof body.profileId !== "string" || typeof body.question !== "string" || !body.question.trim()) {
++    return NextResponse.json({ error: "Bad request" }, { status: 400 });
++  }
++  const question = body.question.trim().slice(0, 2000);
++
++  // Confirm the profile belongs to this account.
++  const { data: profile } = await supabase
+     .from("profiles")
+     .select("*")
+-    .eq("id", profileId)
++    .eq("id", body.profileId)
+     .eq("account_id", user.id)
+     .single();
+ 
+-  if (profileError || !profile) {
+-    return NextResponse.json({ error: "Profile not found" }, { status: 404 });
++  if (!profile) return NextResponse.json({ error: "Profile not found" }, { status: 404 });
++
++  // Find the conversation, or start a new one. If saving isn't possible (for
++  // example the chat-history SQL hasn't been run yet) we still answer, just
++  // without saving — chat keeps working either way.
++  let conversationId: string | null = null;
++  let title: string | null = null;
++  let isNew = false;
++
++  if (typeof body.conversationId === "string") {
++    const { data: existing } = await supabase
++      .from("conversations")
++      .select("id, title")
++      .eq("id", body.conversationId)
++      .eq("profile_id", profile.id)
++      .single();
++    if (existing) {
++      conversationId = existing.id;
++      title = existing.title;
++    }
++  }
++
++  if (!conversationId) {
++    const { data: created } = await supabase
++      .from("conversations")
++      .insert({ profile_id: profile.id, title: makeTitle(question) })
++      .select("id, title")
++      .single();
++    if (created) {
++      conversationId = created.id;
++      title = created.title;
++      isNew = true;
++    }
++  }
++
++  // Recent turns for context (oldest first), read before saving the new question.
++  let history: { role: string; content: string }[] = [];
++  if (conversationId && !isNew) {
++    const { data: recent } = await supabase
++      .from("chat_messages")
++      .select("role, content")
++      .eq("conversation_id", conversationId)
++      .order("created_at", { ascending: false })
++      .limit(10);
++    history = (recent ?? []).reverse();
++  }
++
++  if (conversationId) {
++    await supabase.from("chat_messages").insert({
++      profile_id: profile.id,
++      conversation_id: conversationId,
++      role: "user",
++      content: question,
++    });
++    await supabase
++      .from("conversations")
++      .update({ updated_at: new Date().toISOString() })
++      .eq("id", conversationId);
+   }
+ 
+-  // Pull only the resources matching this student's class, first language
+-  // and medium — the core "only load resources for who signed up" rule.
++  // Only resources matching this student's class and medium reach the model.
+   const { data: resources } = await supabase
+     .from("resources")
+     .select("id, title, content")
+@@ -38,9 +109,7 @@ export async function POST(request: NextRequest) {
+     .eq("medium", profile.medium)
+     .limit(6); // replace with a real vector-similarity match against `question`
+ 
+-  const context = (resources ?? [])
+-    .map((r) => `### ${r.title}\n${r.content}`)
+-    .join("\n\n");
++  const context = (resources ?? []).map((r) => `### ${r.title}\n${r.content}`).join("\n\n");
+ 
+   const systemPrompt = `You are Keralite AI, a study assistant for a Class ${profile.class_level} student
+ studying in ${profile.medium === "english" ? "English" : "Malayalam"} medium, first language
+@@ -50,23 +119,41 @@ isn't in the context, say so plainly instead of guessing.
+ Context:
+ ${context}`;
+ 
+-  const slmResponse = await fetch(process.env.SLM_ENDPOINT!, {
+-    method: "POST",
+-    headers: {
+-      "Content-Type": "application/json",
+-      Authorization: `Bearer ${process.env.SLM_API_KEY}`,
+-    },
+-    body: JSON.stringify({
+-      system: systemPrompt,
+-      messages: history,
+-      question,
+-    }),
+-  });
+-
+-  if (!slmResponse.ok) {
+-    return NextResponse.json({ answer: "The study assistant is unavailable right now — try again shortly." });
++  let answer: string | null = null;
++  try {
++    const slmResponse = await fetch(process.env.SLM_ENDPOINT!, {
++      method: "POST",
++      headers: {
++        "Content-Type": "application/json",
++        Authorization: `Bearer ${process.env.SLM_API_KEY}`,
++      },
++      body: JSON.stringify({
++        system: systemPrompt,
++        messages: [...history, { role: "user", content: question }],
++        question,
++      }),
++    });
++    if (slmResponse.ok) {
++      const data = await slmResponse.json();
++      if (typeof data.answer === "string" && data.answer.trim()) answer = data.answer;
++    }
++  } catch {
++    // Model unreachable or not configured yet — fall through to the friendly message.
++  }
++
++  if (answer === null) {
++    // The question stays saved; the error text is not saved as if it were an answer.
++    return NextResponse.json({ answer: UNAVAILABLE, failed: true, conversationId, title });
++  }
++
++  if (conversationId) {
++    await supabase.from("chat_messages").insert({
++      profile_id: profile.id,
++      conversation_id: conversationId,
++      role: "assistant",
++      content: answer,
++    });
+   }
+ 
+-  const data = await slmResponse.json();
+-  return NextResponse.json({ answer: data.answer });
++  return NextResponse.json({ answer, conversationId, title });
+ }
+diff --git a/src/app/chat/page.tsx b/src/app/chat/page.tsx
+index 181c647..8b44097 100644
+--- a/src/app/chat/page.tsx
++++ b/src/app/chat/page.tsx
+@@ -1,14 +1,14 @@
+ import { redirect } from "next/navigation";
+ import { createClient } from "@/lib/supabase/server";
+ import { ChatInterface } from "@/components/ChatInterface";
+-import type { Profile } from "@/lib/types";
++import type { ChatMessage, Conversation, Profile } from "@/lib/types";
+ 
+ export const runtime = "edge";
+ 
+ export default async function ChatPage({
+   searchParams,
+ }: {
+-  searchParams: { profile?: string };
++  searchParams: { profile?: string; c?: string };
+ }) {
+   const supabase = createClient();
+   const {
+@@ -28,5 +28,37 @@ export default async function ChatPage({
+   const active = list.find((p) => p.id === searchParams.profile) ?? list[0];
+   if (!active) redirect("/select");
+ 
+-  return <ChatInterface profile={active} hasMultipleProfiles={list.length > 1} />;
++  // Saved chats for THIS student only. (If the chat-history SQL hasn't been run
++  // yet this simply comes back empty and chat still works.)
++  const { data: convs } = await supabase
++    .from("conversations")
++    .select("id, title, updated_at")
++    .eq("profile_id", active.id)
++    .order("updated_at", { ascending: false })
++    .limit(50);
++  const conversations = (convs ?? []) as Conversation[];
++
++  let initialConversationId: string | null = null;
++  let initialMessages: ChatMessage[] = [];
++  if (searchParams.c && conversations.some((c) => c.id === searchParams.c)) {
++    initialConversationId = searchParams.c;
++    const { data: msgs } = await supabase
++      .from("chat_messages")
++      .select("role, content")
++      .eq("conversation_id", initialConversationId)
++      .order("created_at", { ascending: true });
++    initialMessages = (msgs ?? []) as ChatMessage[];
++  }
++
++  return (
++    <ChatInterface
++      key={active.id}
++      profile={active}
++      hasMultipleProfiles={list.length > 1}
++      userEmail={user.email ?? ""}
++      initialConversations={conversations}
++      initialConversationId={initialConversationId}
++      initialMessages={initialMessages}
++    />
++  );
+ }
+diff --git a/src/app/privacy/page.tsx b/src/app/privacy/page.tsx
+index 8c6954b..4070147 100644
+--- a/src/app/privacy/page.tsx
++++ b/src/app/privacy/page.tsx
+@@ -30,7 +30,7 @@ export default function PrivacyPage() {
+         <h1 className="text-[36px] font-w460 leading-[1.1] tracking-[-0.022em] md:text-[48px]">
+           Privacy Policy
+         </h1>
+-        <p className="mt-12 text-body-sm text-stone-gray">Last updated: October 2026</p>
++        <p className="mt-12 text-body-sm text-stone-gray">Last updated: 13 October 2026</p>
+ 
+         <p className={p}>
+           Keralite AI is a study assistant for students in Kerala. This page explains what
+@@ -59,9 +59,10 @@ export default function PrivacyPage() {
+             which study resources to show.
+           </li>
+           <li className={li}>
+-            <strong className="font-w540">Questions you ask:</strong> the text of a question is sent
+-            to the AI service that writes the answer. Chat messages are not saved to our database at
+-            this time. If we add saved chat history, we will update this page first.
++            <strong className="font-w540">Chats:</strong> the questions a student asks and the
++            answers they get are saved under that student&apos;s profile, so old chats appear in the
++            sidebar. Only the account that owns the profile can read them. The text of a question
++            is also sent to the AI service that writes the answer.
+           </li>
+           <li className={li}>
+             <strong className="font-w540">Technical information:</strong> a session cookie that keeps
+@@ -73,7 +74,7 @@ export default function PrivacyPage() {
+         <h2 className={h2}>How we use it</h2>
+         <p className={p}>
+           To let you sign in, to keep each student&apos;s profile separate, to show study resources for
+-          the right class and medium, and to answer questions. We do not sell personal information
++          the right class and medium, to answer questions, and to keep each student&apos;s chat history. We do not sell personal information
+           and we do not show advertising.
+         </p>
+ 
+@@ -95,8 +96,9 @@ export default function PrivacyPage() {
+ 
+         <h2 className={h2}>Your choices</h2>
+         <p className={p}>
+-          You can ask us to correct or delete an account or a student profile at any time, and we
+-          will remove it together with its data. Use the contact details below.
++          You can delete any saved chat yourself from the chat list. You can also ask us to correct or
++          delete an account or a student profile at any time, and we will remove it together with
++          its data. Use the contact details below.
+         </p>
+ 
+         <h2 className={h2}>Changes to this policy</h2>
+diff --git a/src/components/ChatInterface.tsx b/src/components/ChatInterface.tsx
+index 7c8f5f9..552d20d 100644
+--- a/src/components/ChatInterface.tsx
++++ b/src/components/ChatInterface.tsx
+@@ -1,13 +1,11 @@
+ "use client";
+ 
+-import { useRef, useState } from "react";
+-import type { Profile } from "@/lib/types";
++import { useEffect, useRef, useState } from "react";
++import { createClient } from "@/lib/supabase/client";
++import type { ChatMessage, Conversation, Profile } from "@/lib/types";
+ import { Button } from "@/components/Button";
+-
+-interface Message {
+-  role: "user" | "assistant";
+-  content: string;
+-}
++import { Sidebar } from "@/components/chat/Sidebar";
++import { MenuIcon } from "@/components/chat/icons";
+ 
+ const CLASS_LABEL: Record<string, string> = {
+   "5": "Class 5", "6": "Class 6", "7": "Class 7", "8": "Class 8", "9": "Class 9",
+@@ -16,115 +14,198 @@ const CLASS_LABEL: Record<string, string> = {
+ export function ChatInterface({
+   profile,
+   hasMultipleProfiles,
++  userEmail,
++  initialConversations,
++  initialConversationId,
++  initialMessages,
+ }: {
+   profile: Profile;
+   hasMultipleProfiles: boolean;
++  userEmail: string;
++  initialConversations: Conversation[];
++  initialConversationId: string | null;
++  initialMessages: ChatMessage[];
+ }) {
+-  const [messages, setMessages] = useState<Message[]>([]);
++  const [supabase] = useState(() => createClient());
++  const [conversations, setConversations] = useState<Conversation[]>(initialConversations);
++  const [activeId, setActiveId] = useState<string | null>(initialConversationId);
++  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+   const [input, setInput] = useState("");
+   const [loading, setLoading] = useState(false);
++  const [loadingChat, setLoadingChat] = useState(false);
++  const [sidebarOpen, setSidebarOpen] = useState(false);
+   const scrollRef = useRef<HTMLDivElement>(null);
++  const loadToken = useRef(0);
++
++  const activeTitle = conversations.find((c) => c.id === activeId)?.title ?? null;
++
++  useEffect(() => {
++    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
++  }, [messages, loading]);
++
++  function setUrl(id: string | null) {
++    window.history.replaceState(null, "", id ? `/chat?profile=${profile.id}&c=${id}` : `/chat?profile=${profile.id}`);
++  }
++
++  function newChat() {
++    loadToken.current++;
++    setActiveId(null);
++    setMessages([]);
++    setSidebarOpen(false);
++    setUrl(null);
++  }
++
++  async function selectConversation(id: string) {
++    setSidebarOpen(false);
++    if (id === activeId) return;
++    const token = ++loadToken.current;
++    setActiveId(id);
++    setMessages([]);
++    setLoadingChat(true);
++    setUrl(id);
++
++    const { data } = await supabase
++      .from("chat_messages")
++      .select("role, content")
++      .eq("conversation_id", id)
++      .order("created_at", { ascending: true });
++
++    if (token !== loadToken.current) return; // user already moved on
++    setMessages((data ?? []) as ChatMessage[]);
++    setLoadingChat(false);
++  }
++
++  async function deleteConversation(id: string) {
++    if (!window.confirm("Delete this chat? This can't be undone.")) return;
++    const { error } = await supabase.from("conversations").delete().eq("id", id);
++    if (error) return;
++    setConversations((list) => list.filter((c) => c.id !== id));
++    if (id === activeId) newChat();
++  }
++
++  async function logOut() {
++    await supabase.auth.signOut();
++    window.location.href = "/";
++  }
+ 
+   async function sendMessage(e: React.FormEvent) {
+     e.preventDefault();
+     const question = input.trim();
+     if (!question || loading) return;
+ 
+-    const next = [...messages, { role: "user" as const, content: question }];
+-    setMessages(next);
++    setMessages((m) => [...m, { role: "user", content: question }]);
+     setInput("");
+     setLoading(true);
+ 
+     try {
+-      // /api/chat filters textbook resources by this profile's class,
+-      // first_language and medium before handing context to the SLM.
+       const res = await fetch("/api/chat", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify({ profileId: profile.id, question, history: next }),
++        body: JSON.stringify({ profileId: profile.id, question, conversationId: activeId }),
+       });
+       const data = await res.json();
+-      setMessages([...next, { role: "assistant", content: data.answer }]);
++
++      if (data.conversationId) {
++        const now = new Date().toISOString();
++        setConversations((list) => {
++          const rest = list.filter((c) => c.id !== data.conversationId);
++          return [{ id: data.conversationId, title: data.title ?? "New chat", updated_at: now }, ...rest];
++        });
++        if (data.conversationId !== activeId) {
++          setActiveId(data.conversationId);
++          setUrl(data.conversationId);
++        }
++      }
++      setMessages((m) => [...m, { role: "assistant", content: data.answer ?? "Something went wrong. Try again." }]);
+     } catch {
+-      setMessages([
+-        ...next,
++      setMessages((m) => [
++        ...m,
+         { role: "assistant", content: "Something went wrong reaching the study assistant. Try again." },
+       ]);
+     } finally {
+       setLoading(false);
+-      requestAnimationFrame(() => scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight));
+     }
+   }
+ 
+   return (
+-    <div className="h-screen flex flex-col bg-warm-parchment">
+-      <header className="safe-top sticky top-0 z-10 backdrop-blur-md bg-warm-parchment/80 border-b border-soft-mist">
+-        <div className="max-w-page mx-auto px-16 h-[64px] flex items-center justify-between">
+-          <div>
+-            <p className="text-body font-w540 leading-none">Keralite AI</p>
+-            <p className="text-caption text-stone-gray leading-none mt-4">
+-              {profile.name} · {CLASS_LABEL[profile.class_level] ?? profile.class_level}
+-            </p>
+-          </div>
+-          {hasMultipleProfiles && (
+-            <a href="/select">
+-              <Button variant="outlined" className="!h-auto text-body-sm">
+-                Switch account
+-              </Button>
+-            </a>
+-          )}
+-        </div>
+-      </header>
+-
+-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+-        <div className="max-w-page mx-auto px-16 py-24 flex flex-col gap-16">
+-          {messages.length === 0 && (
+-            <div className="bg-paper-white/85 border border-soft-mist rounded-floating-cards p-16 max-w-[520px]">
+-              <p className="text-body text-ink-charcoal">
+-                Ask anything from your {profile.medium === "english" ? "English" : "Malayalam"}-medium
+-                {" "}{CLASS_LABEL[profile.class_level] ?? profile.class_level} textbooks — Keralite AI only
+-                answers from resources loaded for your class.
+-              </p>
+-            </div>
+-          )}
++    <div className="flex h-[100dvh] overflow-hidden bg-warm-parchment">
++      <Sidebar
++        open={sidebarOpen}
++        onClose={() => setSidebarOpen(false)}
++        conversations={conversations}
++        activeId={activeId}
++        onNew={newChat}
++        onSelect={selectConversation}
++        onDelete={deleteConversation}
++        profile={profile}
++        hasMultipleProfiles={hasMultipleProfiles}
++        userEmail={userEmail}
++        onLogout={logOut}
++      />
+ 
+-          {messages.map((m, i) => (
+-            <div
+-              key={i}
+-              className={`max-w-[80%] rounded-floating-cards p-16 text-body ${
+-                m.role === "user"
+-                  ? "self-end bg-lilac-mist text-ink-charcoal"
+-                  : "self-start bg-paper-white/85 border border-soft-mist text-ink-charcoal"
+-              }`}
+-            >
+-              {m.content}
+-            </div>
+-          ))}
++      <div className="flex min-w-0 flex-1 flex-col">
++        <header className="safe-top flex min-h-[64px] items-center gap-8 border-b border-soft-mist bg-warm-parchment/80 px-16 backdrop-blur-[12px]">
++          <button
++            onClick={() => setSidebarOpen(true)}
++            aria-label="Open menu"
++            className="-ml-8 p-8 md:hidden"
++          >
++            <MenuIcon />
++          </button>
++          <p className="truncate text-body font-w540">{activeTitle ?? "Keralite AI"}</p>
++        </header>
+ 
+-          {loading && (
+-            <div className="self-start bg-paper-white/85 border border-soft-mist rounded-floating-cards p-16 text-body-sm text-stone-gray">
+-              Thinking…
++        <div ref={scrollRef} className="flex-1 overflow-y-auto">
++          {messages.length === 0 && !loadingChat && !loading ? (
++            <div className="mx-auto max-w-[720px] px-16 pt-48 md:pt-80">
++              <h1 className="text-[32px] font-w460 leading-[1.1] tracking-[-0.022em] md:text-[48px] md:leading-[0.96]">
++                Hello, {profile.name}
++              </h1>
++              <p className="mt-16 max-w-[520px] text-label-bold leading-[1.4] text-stone-gray">
++                Ask anything from your {CLASS_LABEL[profile.class_level] ?? profile.class_level}{" "}
++                {profile.medium === "english" ? "English" : "Malayalam"}-medium textbooks.
++              </p>
++            </div>
++          ) : (
++            <div className="mx-auto flex w-full max-w-[720px] flex-col gap-16 px-16 py-24">
++              {loadingChat && <p className="text-body-sm text-stone-gray">Loading chat…</p>}
++              {messages.map((m, i) => (
++                <div
++                  key={i}
++                  className={`max-w-[85%] whitespace-pre-wrap rounded-floating-cards p-16 text-body leading-[1.5] ${
++                    m.role === "user"
++                      ? "self-end bg-lilac-mist"
++                      : "self-start border border-soft-mist bg-paper-white"
++                  }`}
++                >
++                  {m.content}
++                </div>
++              ))}
++              {loading && (
++                <div className="self-start rounded-floating-cards border border-soft-mist bg-paper-white p-16 text-body-sm text-stone-gray">
++                  Thinking…
++                </div>
++              )}
+             </div>
+           )}
+         </div>
+-      </div>
+ 
+-      <form
+-        onSubmit={sendMessage}
+-        className="safe-bottom border-t border-soft-mist bg-warm-parchment"
+-      >
+-        <div className="max-w-page mx-auto px-16 py-12 flex gap-8">
+-          <input
+-            value={input}
+-            onChange={(e) => setInput(e.target.value)}
+-            placeholder="Ask about today's lesson…"
+-            className="flex-1 border border-soft-mist rounded-small-buttons px-16 h-[48px] text-body bg-paper-white outline-none focus:border-royal-violet"
+-          />
+-          <Button type="submit" disabled={loading || !input.trim()}>
+-            Ask
+-          </Button>
+-        </div>
+-      </form>
++        <form onSubmit={sendMessage} className="safe-bottom bg-warm-parchment">
++          <div className="mx-auto max-w-[720px] px-16 pb-12 pt-8">
++            <div className="flex gap-8 rounded-cards border border-soft-mist bg-paper-white p-8 focus-within:border-ink-charcoal">
++              <input
++                value={input}
++                onChange={(e) => setInput(e.target.value)}
++                placeholder="Ask about today's lesson…"
++                className="h-[48px] min-w-0 flex-1 bg-transparent px-12 text-body outline-none"
++              />
++              <Button type="submit" disabled={loading || !input.trim()}>
++                Ask
++              </Button>
++            </div>
++          </div>
++        </form>
++      </div>
+     </div>
+   );
+ }
+diff --git a/src/components/chat/ProfileMenu.tsx b/src/components/chat/ProfileMenu.tsx
+new file mode 100644
+index 0000000..9aef699
+--- /dev/null
++++ b/src/components/chat/ProfileMenu.tsx
+@@ -0,0 +1,95 @@
++"use client";
++
++import { useEffect, useRef, useState } from "react";
++import type { Profile } from "@/lib/types";
++import { ChevronIcon, LogoutIcon, SwitchIcon } from "./icons";
++
++const CLASS_LABEL: Record<string, string> = {
++  "5": "Class 5", "6": "Class 6", "7": "Class 7", "8": "Class 8", "9": "Class 9",
++};
++
++// Bottom-corner profile control, like Gemini: tap to open a small menu upwards.
++export function ProfileMenu({
++  profile,
++  hasMultipleProfiles,
++  userEmail,
++  onLogout,
++}: {
++  profile: Profile;
++  hasMultipleProfiles: boolean;
++  userEmail: string;
++  onLogout: () => void;
++}) {
++  const [open, setOpen] = useState(false);
++  const ref = useRef<HTMLDivElement>(null);
++
++  useEffect(() => {
++    if (!open) return;
++    const onDown = (e: MouseEvent | TouchEvent) => {
++      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
++    };
++    const onKey = (e: KeyboardEvent) => {
++      if (e.key === "Escape") setOpen(false);
++    };
++    document.addEventListener("mousedown", onDown);
++    document.addEventListener("touchstart", onDown);
++    document.addEventListener("keydown", onKey);
++    return () => {
++      document.removeEventListener("mousedown", onDown);
++      document.removeEventListener("touchstart", onDown);
++      document.removeEventListener("keydown", onKey);
++    };
++  }, [open]);
++
++  const initial = (profile.name.trim()[0] ?? "?").toUpperCase();
++
++  return (
++    <div ref={ref} className="relative">
++      {open && (
++        <div
++          role="menu"
++          className="absolute bottom-full left-0 right-0 mb-8 rounded-cards border border-soft-mist bg-paper-white p-8"
++        >
++          {userEmail && (
++            <p className="truncate px-12 pb-8 pt-4 text-caption text-stone-gray">{userEmail}</p>
++          )}
++          {hasMultipleProfiles && (
++            <a
++              role="menuitem"
++              href="/select"
++              className="flex items-center gap-12 rounded-small-buttons px-12 py-12 text-body hover:bg-warm-parchment"
++            >
++              <SwitchIcon /> Switch student
++            </a>
++          )}
++          <button
++            role="menuitem"
++            onClick={onLogout}
++            className="flex w-full items-center gap-12 rounded-small-buttons px-12 py-12 text-left text-body hover:bg-warm-parchment"
++          >
++            <LogoutIcon /> Log out
++          </button>
++        </div>
++      )}
++
++      <button
++        onClick={() => setOpen((o) => !o)}
++        aria-haspopup="menu"
++        aria-expanded={open}
++        className="flex w-full items-center gap-12 rounded-cards p-8 text-left hover:bg-warm-parchment"
++      >
++        <span className="flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-pill bg-lilac-mist text-body font-w540">
++          {initial}
++        </span>
++        <span className="min-w-0 flex-1">
++          <span className="block truncate text-body-sm font-w540">{profile.name}</span>
++          <span className="block truncate text-caption text-stone-gray">
++            {CLASS_LABEL[profile.class_level] ?? profile.class_level} ·{" "}
++            {profile.medium === "english" ? "English" : "Malayalam"} medium
++          </span>
++        </span>
++        <ChevronIcon className={`h-16 w-16 shrink-0 text-stone-gray transition-transform ${open ? "" : "rotate-180"}`} />
++      </button>
++    </div>
++  );
++}
+diff --git a/src/components/chat/Sidebar.tsx b/src/components/chat/Sidebar.tsx
+new file mode 100644
+index 0000000..1717431
+--- /dev/null
++++ b/src/components/chat/Sidebar.tsx
+@@ -0,0 +1,108 @@
++"use client";
++
++import type { Conversation, Profile } from "@/lib/types";
++import { CloseIcon, PlusIcon, TrashIcon } from "./icons";
++import { ProfileMenu } from "./ProfileMenu";
++
++export function Sidebar({
++  open,
++  onClose,
++  conversations,
++  activeId,
++  onNew,
++  onSelect,
++  onDelete,
++  profile,
++  hasMultipleProfiles,
++  userEmail,
++  onLogout,
++}: {
++  open: boolean;
++  onClose: () => void;
++  conversations: Conversation[];
++  activeId: string | null;
++  onNew: () => void;
++  onSelect: (id: string) => void;
++  onDelete: (id: string) => void;
++  profile: Profile;
++  hasMultipleProfiles: boolean;
++  userEmail: string;
++  onLogout: () => void;
++}) {
++  return (
++    <>
++      {/* Phone: dim the page behind the drawer. No shadows anywhere (DESIGN.md). */}
++      {open && (
++        <div className="fixed inset-0 z-30 bg-ink-charcoal/40 md:hidden" onClick={onClose} aria-hidden="true" />
++      )}
++
++      <aside
++        aria-label="Chats"
++        className={`fixed inset-y-0 left-0 z-40 flex w-[288px] max-w-[85vw] flex-col border-r border-soft-mist bg-paper-white transition-transform duration-200 md:static md:z-auto md:w-[280px] md:max-w-none md:shrink-0 md:translate-x-0 ${
++          open ? "translate-x-0" : "-translate-x-full"
++        }`}
++      >
++        <div className="safe-top flex min-h-[64px] items-center justify-between px-16">
++          <span className="text-label-bold font-w540 tracking-[-0.01em]">Keralite AI</span>
++          <button onClick={onClose} aria-label="Close menu" className="-mr-8 p-8 md:hidden">
++            <CloseIcon />
++          </button>
++        </div>
++
++        <div className="px-12">
++          <button
++            onClick={onNew}
++            className="flex w-full items-center justify-center gap-8 rounded-small-buttons border border-ink-charcoal bg-lilac-mist px-16 py-12 text-body font-w460"
++          >
++            <PlusIcon className="h-16 w-16" /> New chat
++          </button>
++        </div>
++
++        <p className="px-16 pb-8 pt-24 text-caption text-stone-gray">Recent</p>
++
++        <nav className="flex-1 overflow-y-auto px-8">
++          {conversations.length === 0 ? (
++            <p className="px-8 text-body-sm leading-[1.5] text-stone-gray">
++              No chats yet. Ask a question and it will appear here.
++            </p>
++          ) : (
++            <ul className="flex flex-col gap-4">
++              {conversations.map((c) => {
++                const active = c.id === activeId;
++                return (
++                  <li key={c.id} className="group relative">
++                    <button
++                      onClick={() => onSelect(c.id)}
++                      aria-current={active ? "true" : undefined}
++                      className={`flex w-full items-center rounded-small-buttons px-12 py-12 pr-40 text-left text-body-sm ${
++                        active ? "bg-lilac-mist" : "hover:bg-warm-parchment"
++                      }`}
++                    >
++                      <span className="truncate">{c.title}</span>
++                    </button>
++                    <button
++                      onClick={() => onDelete(c.id)}
++                      aria-label={`Delete chat: ${c.title}`}
++                      className="absolute right-4 top-1/2 -translate-y-1/2 rounded-small-buttons p-8 text-stone-gray hover:text-midnight-wine"
++                    >
++                      <TrashIcon className="h-16 w-16" />
++                    </button>
++                  </li>
++                );
++              })}
++            </ul>
++          )}
++        </nav>
++
++        <div className="safe-bottom border-t border-soft-mist p-8">
++          <ProfileMenu
++            profile={profile}
++            hasMultipleProfiles={hasMultipleProfiles}
++            userEmail={userEmail}
++            onLogout={onLogout}
++          />
++        </div>
++      </aside>
++    </>
++  );
++}
+diff --git a/src/components/chat/icons.tsx b/src/components/chat/icons.tsx
+new file mode 100644
+index 0000000..472ffa1
+--- /dev/null
++++ b/src/components/chat/icons.tsx
+@@ -0,0 +1,55 @@
++// Minimal single-weight line icons (DESIGN.md: ~16-20px monochrome strokes).
++type P = { className?: string };
++
++function Svg({ className = "h-20 w-20", children }: P & { children: React.ReactNode }) {
++  return (
++    <svg
++      viewBox="0 0 24 24"
++      fill="none"
++      stroke="currentColor"
++      strokeWidth="1.5"
++      strokeLinecap="round"
++      strokeLinejoin="round"
++      className={className}
++      aria-hidden="true"
++    >
++      {children}
++    </svg>
++  );
++}
++
++export const MenuIcon = (p: P) => (
++  <Svg {...p}>
++    <path d="M4 7h16M4 12h16M4 17h16" />
++  </Svg>
++);
++export const CloseIcon = (p: P) => (
++  <Svg {...p}>
++    <path d="M6 6l12 12M18 6L6 18" />
++  </Svg>
++);
++export const PlusIcon = (p: P) => (
++  <Svg {...p}>
++    <path d="M12 5v14M5 12h14" />
++  </Svg>
++);
++export const TrashIcon = (p: P) => (
++  <Svg {...p}>
++    <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12h10l1-12M9 7V4h6v3" />
++  </Svg>
++);
++export const LogoutIcon = (p: P) => (
++  <Svg {...p}>
++    <path d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4M15 8l4 4-4 4M19 12H9" />
++  </Svg>
++);
++export const SwitchIcon = (p: P) => (
++  <Svg {...p}>
++    <path d="M7 7h11l-3-3M17 17H6l3 3" />
++  </Svg>
++);
++export const ChevronIcon = (p: P) => (
++  <Svg {...p}>
++    <path d="M7 14l5-5 5 5" />
++  </Svg>
++);
+diff --git a/src/lib/types.ts b/src/lib/types.ts
+index 5904423..15203c3 100644
+--- a/src/lib/types.ts
++++ b/src/lib/types.ts
+@@ -14,3 +14,14 @@ export interface Profile {
+   avatar_emoji: string | null;
+   created_at: string;
+ }
++
++export interface Conversation {
++  id: string;
++  title: string;
++  updated_at: string;
++}
++
++export interface ChatMessage {
++  role: "user" | "assistant";
++  content: string;
++}
+diff --git a/supabase/migrations/002_chat_history.sql b/supabase/migrations/002_chat_history.sql
+new file mode 100644
+index 0000000..f9ba949
+--- /dev/null
++++ b/supabase/migrations/002_chat_history.sql
+@@ -0,0 +1,64 @@
++-- Keralite AI: saved chats (the "Recent" list in the sidebar).
++-- Safe to run more than once. Run it in the Supabase SQL editor.
++
++create table if not exists public.conversations (
++  id uuid primary key default gen_random_uuid(),
++  profile_id uuid not null references public.profiles(id) on delete cascade,
++  title text not null default 'New chat',
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now()
++);
++
++create index if not exists conversations_profile_updated_idx
++  on public.conversations (profile_id, updated_at desc);
++
++alter table public.conversations enable row level security;
++
++drop policy if exists "Users manage only their own profiles' conversations" on public.conversations;
++create policy "Users manage only their own profiles' conversations"
++  on public.conversations
++  for all
++  using (
++    exists (
++      select 1 from public.profiles p
++      where p.id = conversations.profile_id and p.account_id = auth.uid()
++    )
++  )
++  with check (
++    exists (
++      select 1 from public.profiles p
++      where p.id = conversations.profile_id and p.account_id = auth.uid()
++    )
++  );
++
++-- Messages now belong to a conversation.
++alter table public.chat_messages
++  add column if not exists conversation_id uuid references public.conversations(id) on delete cascade;
++
++create index if not exists chat_messages_conversation_idx
++  on public.chat_messages (conversation_id, created_at);
++
++-- Tighten the messages policy: a message must sit in a conversation of the SAME profile.
++drop policy if exists "Users manage only their own profiles' messages" on public.chat_messages;
++create policy "Users manage only their own profiles' messages"
++  on public.chat_messages
++  for all
++  using (
++    exists (
++      select 1 from public.profiles p
++      where p.id = chat_messages.profile_id and p.account_id = auth.uid()
++    )
++  )
++  with check (
++    exists (
++      select 1 from public.profiles p
++      where p.id = chat_messages.profile_id and p.account_id = auth.uid()
++    )
++    and (
++      conversation_id is null
++      or exists (
++        select 1 from public.conversations c
++        where c.id = chat_messages.conversation_id and c.profile_id = chat_messages.profile_id
++      )
++    )
++  );
+diff --git a/supabase/schema.sql b/supabase/schema.sql
+index 0c55e1e..d9249fa 100644
+--- a/supabase/schema.sql
++++ b/supabase/schema.sql
+@@ -20,6 +20,7 @@ create table if not exists public.profiles (
+ 
+ alter table public.profiles enable row level security;
+ 
++drop policy if exists "Users manage only their own profiles" on public.profiles;
+ create policy "Users manage only their own profiles"
+   on public.profiles
+   for all
+@@ -40,6 +41,7 @@ create table if not exists public.resources (
+ 
+ alter table public.resources enable row level security;
+ 
++drop policy if exists "Any signed-in user can read resources" on public.resources;
+ create policy "Any signed-in user can read resources"
+   on public.resources
+   for select
+@@ -56,6 +58,7 @@ create table if not exists public.chat_messages (
+ 
+ alter table public.chat_messages enable row level security;
+ 
++drop policy if exists "Users manage only their own profiles' messages" on public.chat_messages;
+ create policy "Users manage only their own profiles' messages"
+   on public.chat_messages
+   for all
+@@ -77,3 +80,69 @@ create policy "Users manage only their own profiles' messages"
+ -- create extension if not exists vector;
+ -- alter table public.resources add column embedding vector(384);
+ -- create index on public.resources using ivfflat (embedding vector_cosine_ops);
++
++
++-- ---------------------------------------------------------------------
++-- Chat history (conversations). Same content as migrations/002_chat_history.sql
++-- ---------------------------------------------------------------------
++create table if not exists public.conversations (
++  id uuid primary key default gen_random_uuid(),
++  profile_id uuid not null references public.profiles(id) on delete cascade,
++  title text not null default 'New chat',
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now()
++);
++
++create index if not exists conversations_profile_updated_idx
++  on public.conversations (profile_id, updated_at desc);
++
++alter table public.conversations enable row level security;
++
++drop policy if exists "Users manage only their own profiles' conversations" on public.conversations;
++create policy "Users manage only their own profiles' conversations"
++  on public.conversations
++  for all
++  using (
++    exists (
++      select 1 from public.profiles p
++      where p.id = conversations.profile_id and p.account_id = auth.uid()
++    )
++  )
++  with check (
++    exists (
++      select 1 from public.profiles p
++      where p.id = conversations.profile_id and p.account_id = auth.uid()
++    )
++  );
++
++-- Messages now belong to a conversation.
++alter table public.chat_messages
++  add column if not exists conversation_id uuid references public.conversations(id) on delete cascade;
++
++create index if not exists chat_messages_conversation_idx
++  on public.chat_messages (conversation_id, created_at);
++
++-- Tighten the messages policy: a message must sit in a conversation of the SAME profile.
++drop policy if exists "Users manage only their own profiles' messages" on public.chat_messages;
++create policy "Users manage only their own profiles' messages"
++  on public.chat_messages
++  for all
++  using (
++    exists (
++      select 1 from public.profiles p
++      where p.id = chat_messages.profile_id and p.account_id = auth.uid()
++    )
++  )
++  with check (
++    exists (
++      select 1 from public.profiles p
++      where p.id = chat_messages.profile_id and p.account_id = auth.uid()
++    )
++    and (
++      conversation_id is null
++      or exists (
++        select 1 from public.conversations c
++        where c.id = chat_messages.conversation_id and c.profile_id = chat_messages.profile_id
++      )
++    )
++  );
+-- 
+2.43.0
+
