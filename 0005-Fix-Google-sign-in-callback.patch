@@ -1,0 +1,93 @@
+From e5a0126af24ed99c83049700610533b014ca17bd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 15 Oct 2026 05:20:38 +0000
+Subject: [PATCH] Fix Google sign-in: add OAuth callback that creates the
+ session
+
+After picking a Google account Supabase returns ?code=...; nothing exchanged it, so people stayed logged out on the home page. Add /auth/callback (exchangeCodeForSession), point signInWithOAuth at it, show an error on /auth if it fails, and forward a stray ?code on / to the callback.
+---
+ src/app/auth/callback/route.ts | 26 ++++++++++++++++++++++++++
+ src/app/auth/page.tsx          |  8 +++++---
+ src/app/page.tsx               |  6 +++++-
+ 3 files changed, 36 insertions(+), 4 deletions(-)
+ create mode 100644 src/app/auth/callback/route.ts
+
+diff --git a/src/app/auth/callback/route.ts b/src/app/auth/callback/route.ts
+new file mode 100644
+index 0000000..8824292
+--- /dev/null
++++ b/src/app/auth/callback/route.ts
+@@ -0,0 +1,26 @@
++import { NextResponse, type NextRequest } from "next/server";
++import { createClient } from "@/lib/supabase/server";
++
++export const runtime = "edge";
++
++// Where Google sign-in lands after Supabase. Supabase sends back a one-time
++// `code`; this route swaps it for a real session (stored in cookies) and then
++// sends the person on to "/", which routes them to onboarding, the student
++// picker, or chat.
++export async function GET(request: NextRequest) {
++  const { searchParams, origin } = new URL(request.url);
++  const code = searchParams.get("code");
++
++  if (code) {
++    try {
++      const supabase = createClient();
++      const { error } = await supabase.auth.exchangeCodeForSession(code);
++      if (!error) return NextResponse.redirect(`${origin}/`);
++    } catch {
++      // fall through to the error redirect below
++    }
++  }
++
++  // Cancelled, expired or invalid: back to the login page with a message.
++  return NextResponse.redirect(`${origin}/auth?error=oauth`);
++}
+diff --git a/src/app/auth/page.tsx b/src/app/auth/page.tsx
+index 775f1a6..9c64b3d 100644
+--- a/src/app/auth/page.tsx
++++ b/src/app/auth/page.tsx
+@@ -25,9 +25,11 @@ export default function AuthPage() {
+   const [error, setError] = useState<string | null>(null);
+   const [loading, setLoading] = useState(false);
+ 
+-  // Landing page links here with ?mode=signup
++  // Landing page links here with ?mode=signup; the Google callback adds ?error=oauth on failure
+   useEffect(() => {
+-    if (new URLSearchParams(window.location.search).get("mode") === "signup") setMode("sign-up");
++    const params = new URLSearchParams(window.location.search);
++    if (params.get("mode") === "signup") setMode("sign-up");
++    if (params.get("error")) setError("Google sign-in didn't finish. Please try again.");
+   }, []);
+ 
+   async function handleEmailAuth(e: React.FormEvent) {
+@@ -65,7 +67,7 @@ export default function AuthPage() {
+   async function handleGoogleAuth() {
+     await supabase.auth.signInWithOAuth({
+       provider: "google",
+-      options: { redirectTo: `${window.location.origin}/` },
++      options: { redirectTo: `${window.location.origin}/auth/callback` },
+     });
+   }
+ 
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index b8fe68f..8de3921 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -9,7 +9,11 @@ export const runtime = "edge";
+ // - no profiles yet on this account -> onboarding
+ // - exactly one profile -> straight into chat with it pre-selected
+ // - two or more profiles -> the profile-select screen first
+-export default async function Home() {
++export default async function Home({ searchParams }: { searchParams: { code?: string } }) {
++  // Safety net: if Supabase ever sends the sign-in code to "/" instead of the
++  // callback route (e.g. a redirect-URL setting), finish the sign-in anyway.
++  if (searchParams.code) redirect(`/auth/callback?code=${encodeURIComponent(searchParams.code)}`);
++
+   const supabase = createClient();
+   const {
+     data: { user },
+-- 
+2.43.0
+

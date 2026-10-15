@@ -9,7 +9,11 @@ export const runtime = "edge";
 // - no profiles yet on this account -> onboarding
 // - exactly one profile -> straight into chat with it pre-selected
 // - two or more profiles -> the profile-select screen first
-export default async function Home() {
+export default async function Home({ searchParams }: { searchParams: { code?: string } }) {
+  // Safety net: if Supabase ever sends the sign-in code to "/" instead of the
+  // callback route (e.g. a redirect-URL setting), finish the sign-in anyway.
+  if (searchParams.code) redirect(`/auth/callback?code=${encodeURIComponent(searchParams.code)}`);
+
   const supabase = createClient();
   const {
     data: { user },

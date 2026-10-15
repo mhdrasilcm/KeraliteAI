@@ -25,9 +25,11 @@ export default function AuthPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Landing page links here with ?mode=signup
+  // Landing page links here with ?mode=signup; the Google callback adds ?error=oauth on failure
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("mode") === "signup") setMode("sign-up");
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mode") === "signup") setMode("sign-up");
+    if (params.get("error")) setError("Google sign-in didn't finish. Please try again.");
   }, []);
 
   async function handleEmailAuth(e: React.FormEvent) {
@@ -65,7 +67,7 @@ export default function AuthPage() {
   async function handleGoogleAuth() {
     await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/` },
+      options: { redirectTo: `${window.location.origin}/auth/callback` },
     });
   }
 
